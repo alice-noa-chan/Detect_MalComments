@@ -1,7 +1,7 @@
 import torch
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
-from transformers import AutoTokenizer, AutoModelForSequenceClassification, AdamW, get_linear_schedule_with_warmup
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, AdamW
 from tqdm import tqdm
 import pandas as pd
 import numpy as np
@@ -10,6 +10,7 @@ import emoji
 from soynlp.normalizer import repeat_normalize
 from imblearn.over_sampling import RandomOverSampler
 from collections import Counter
+from sklearn.metrics import f1_score
 
 # KcELECTRA 모델과 토크나이저 로드
 tokenizer = AutoTokenizer.from_pretrained("beomi/KcELECTRA-base-v2022")
@@ -57,14 +58,13 @@ print("Resampled dataset shape:", Counter(train_labels_res))
 train_dataset = CommentDataset(train_comments_res, train_labels_res)
 val_dataset = CommentDataset(val_comments, val_labels)
 
-train_dataloader = DataLoader(train_dataset, batch_size=32)
+train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True)
 val_dataloader = DataLoader(val_dataset, batch_size=32)
 
 # 모델 학습 설정
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 model.to(device)
-optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5)
-scheduler =torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min')
+optimizer = AdamW(model.parameters(), lr=1e-5, weight_decay=0.01)  # L2 규제 적용
 
 # early stopping criteria
 early_stop = False
@@ -81,34 +81,41 @@ for epoch in range(5):  # 5 epoch 학습
     epoch_loss = 0.0
     correct = 0
     total = 0
+    predictions, true_labels = [], []
 
     # Training Phase
-    data_iter = tqdm(enumerate(train_dataloader), total=len(train_dataloader), desc=f"Train epoch {epoch}")
-    for i, (texts, labels) in data_iter:
+    for texts, labels in tqdm(train_dataloader, desc=f"Train epoch {epoch}"):
         inputs = tokenizer(texts, return_tensors='pt', padding=True, truncation=True, max_length=512).to(device)
         labels = labels.to(device)
 
+        model.zero_grad()
         outputs = model(**inputs)
         logits = outputs.logits
         loss = torch.nn.functional.cross_entropy(logits, labels)
         preds = torch.argmax(logits, dim=1)
         correct += (preds == labels).sum().item()
-        total += labels.numel()
+        total += labels.size(0)
+        predictions.extend(preds.view(-1).cpu().numpy())
+        true_labels.extend(labels.view(-1).cpu().numpy())
 
-        optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
         epoch_loss += loss.item()
-        data_iter.set_postfix({'loss': epoch_loss / (i + 1), 'accuracy': correct / total})
+
+    train_accuracy = correct / total
+    train_f1 = f1_score(true_labels, predictions, average='binary')
+    print(f"\nTrain Loss: {epoch_loss / len(train_dataloader):.4f}, Accuracy: {train_accuracy:.4f}, F1-Score: {train_f1:.4f}")
 
     # Validation Phase
+    model.eval()
     val_loss = 0.0
     correct = 0
     total = 0
-    model.eval()
+    predictions, true_labels = [], []
+
     with torch.no_grad():
-        for texts, labels in val_dataloader:
+        for texts, labels in tqdm(val_dataloader, desc="Validating"):
             inputs = tokenizer(texts, return_tensors='pt', padding=True, truncation=True, max_length=512).to(device)
             labels = labels.to(device)
 
@@ -117,13 +124,15 @@ for epoch in range(5):  # 5 epoch 학습
             loss = torch.nn.functional.cross_entropy(logits, labels)
             preds = torch.argmax(logits, dim=1)
             correct += (preds == labels).sum().item()
-            total += labels.numel()
+            total += labels.size(0)
+            predictions.extend(preds.view(-1).cpu().numpy())
+            true_labels.extend(labels.view(-1).cpu().numpy())
 
             val_loss += loss.item()
 
-    val_loss /= len(val_dataloader)
-    print(f"\nValidation loss: {val_loss:.4f}, accuracy: {correct / total:.4f}")
-    model.train()
+    val_accuracy = correct / total
+    val_f1 = f1_score(true_labels, predictions, average='binary')
+    print(f"\nValidation Loss: {val_loss / len(val_dataloader):.4f}, Accuracy: {val_accuracy:.4f}, F1-Score: {val_f1:.4f}")
 
     # Check early stopping conditions
     if val_loss < best_loss:
@@ -135,8 +144,7 @@ for epoch in range(5):  # 5 epoch 학습
         if counter >= patience:
             early_stop = True
 
-    # Adjust learning rate
-    scheduler.step(val_loss)
+    model.train()
 
 # 모델 저장
 torch.save(model.state_dict(), 'kc_electra_model.pt')
