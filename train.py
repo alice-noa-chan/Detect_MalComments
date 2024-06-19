@@ -1,7 +1,9 @@
 import torch
 from torch.utils.data import Dataset, DataLoader
+from torch.optim import AdamW
 from sklearn.model_selection import train_test_split
-from transformers import AutoTokenizer, AutoModelForSequenceClassification, AdamW
+from sklearn.metrics import f1_score
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from tqdm import tqdm
 import pandas as pd
 import numpy as np
@@ -10,7 +12,6 @@ import emoji
 from soynlp.normalizer import repeat_normalize
 from imblearn.over_sampling import RandomOverSampler
 from collections import Counter
-from sklearn.metrics import f1_score
 
 # KcELECTRA 모델과 토크나이저 로드
 tokenizer = AutoTokenizer.from_pretrained("beomi/KcELECTRA-base-v2022")
